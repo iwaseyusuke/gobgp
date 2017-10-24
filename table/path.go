@@ -209,17 +209,22 @@ func UpdatePathAttrs(global *config.Global, peer *config.Neighbor, info *PeerInf
 	}
 	path := original.Clone(original.IsWithdraw)
 
+	var attributeAigp *bgp.PathAttributeAigp
 	for _, a := range path.GetPathAttrs() {
-		if _, y := bgp.PathAttrFlags[a.GetType()]; !y {
+		attrType := a.GetType()
+		if attrType == bgp.BGP_ATTR_TYPE_AIGP {
+			attributeAigp = a.(*bgp.PathAttributeAigp)
+		}
+		if _, y := bgp.PathAttrFlags[attrType]; !y {
 			if a.GetFlags()&bgp.BGP_ATTR_FLAG_TRANSITIVE == 0 {
-				path.delPathAttr(a.GetType())
+				path.delPathAttr(attrType)
 			}
 		} else {
-			switch a.GetType() {
+			switch attrType {
 			case bgp.BGP_ATTR_TYPE_CLUSTER_LIST, bgp.BGP_ATTR_TYPE_ORIGINATOR_ID:
 				if !(peer.State.PeerType == config.PEER_TYPE_INTERNAL && peer.RouteReflector.Config.RouteReflectorClient) {
 					// send these attributes to only rr clients
-					path.delPathAttr(a.GetType())
+					path.delPathAttr(attrType)
 				}
 			}
 		}
@@ -310,6 +315,27 @@ func UpdatePathAttrs(global *config.Global, peer *config.Neighbor, info *PeerInf
 			"Key":   peer.State.NeighborAddress,
 		}).Warnf("invalid peer type: %d", peer.State.PeerType)
 	}
+
+	// RFC7311: The Accumulated IGP Metric Attribute for BGP
+	nexthop = path.GetNexthop() // updated nexthop
+	if path.IsLocal() && attributeAigp != nil {
+		// We add the AIGP attribute to the routes from CLI with the given
+		// metric value for the backward compatibility.
+		path.setPathAttr(bgp.NewPathAttributeAigp([]bgp.AigpTLV{bgp.NewAigpTLVIgpMetric(attributeAigp.GetIgpMetric())}))
+	} else if peer.IsAigpEnabled(path.GetRouteFamily()) && nexthop.Equal(localAddress) {
+		// 3.4.1. Originating the AIGP Attribute
+		// A BGP speaker R MUST NOT add the AIGP attribute to any route for
+		// which R does not set itself as the next hop.
+		nexthopState := path.GetNexthopState()
+		if nexthopState.IsIgpActive() {
+			aigpMetric := uint64(nexthopState.IgpMetric)
+			if attributeAigp != nil {
+				aigpMetric += attributeAigp.GetIgpMetric()
+			}
+			path.setPathAttr(bgp.NewPathAttributeAigp([]bgp.AigpTLV{bgp.NewAigpTLVIgpMetric(aigpMetric)}))
+		}
+	}
+
 	return path
 }
 
@@ -1033,6 +1059,14 @@ func (path *Path) SetMed(med int64, doReplace bool) error {
 	}
 	path.setPathAttr(newMed)
 	return nil
+}
+
+func (path *Path) GetAigpMetric() (uint64, error) {
+	attr := path.getPathAttr(bgp.BGP_ATTR_TYPE_AIGP)
+	if attr == nil {
+		return 0, fmt.Errorf("no aigp path attr")
+	}
+	return attr.(*bgp.PathAttributeAigp).GetIgpMetric(), nil
 }
 
 func (path *Path) RemoveLocalPref() {

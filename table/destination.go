@@ -40,6 +40,7 @@ const (
 	BPR_HIGHEST_WEIGHT     BestPathReason = "Highest Weight"
 	BPR_LOCAL_PREF         BestPathReason = "Local Pref"
 	BPR_LOCAL_ORIGIN       BestPathReason = "Local Origin"
+	BPR_AIGP_METRIC        BestPathReason = "AIGP Metric"
 	BPR_ASPATH             BestPathReason = "AS Path"
 	BPR_ORIGIN             BestPathReason = "Origin"
 	BPR_MED                BestPathReason = "MED"
@@ -536,36 +537,36 @@ func (p paths) Swap(i, j int) {
 }
 
 func (p paths) Less(i, j int) bool {
-
-	//Compares given paths and returns best path.
+	// Compares given paths and returns best path.
 	//
-	//Parameters:
-	//	-`path1`: first path to compare
-	//	-`path2`: second path to compare
+	// Parameters:
+	//  -`path1`: first path to compare
+	//  -`path2`: second path to compare
 	//
-	//	Best path processing will involve following steps:
-	//	1.  Select a path with a reachable next hop.
-	//	2.  Select the path with the highest weight.
-	//	3.  If path weights are the same, select the path with the highest
-	//	local preference value.
-	//	4.  Prefer locally originated routes (network routes, redistributed
-	//	routes, or aggregated routes) over received routes.
-	//	5.  Select the route with the shortest AS-path length.
-	//	6.  If all paths have the same AS-path length, select the path based
-	//	on origin: IGP is preferred over EGP; EGP is preferred over
-	//	Incomplete.
-	//	7.  If the origins are the same, select the path with lowest MED
-	//	value.
-	//	8.  If the paths have the same MED values, select the path learned
-	//	via EBGP over one learned via IBGP.
-	//	9.  Select the route with the lowest IGP cost to the next hop.
-	//	10. Select the route received from the peer with the lowest BGP
-	//	router ID.
+	// Best path processing will involve following steps:
+	//  1.  Select a path with a reachable next hop.
+	//  2.  Select the path with the highest weight.
+	//  3.  If path weights are the same, select the path with the highest
+	//      local preference value.
+	//  4.  Prefer locally originated routes (network routes, redistributed
+	//      routes, or aggregated routes) over received routes.
+	//  (Optional) If Accumulated IGP Metric feature is enabled, select the
+	//      path with lowest Accumulated IGP Metric.
+	//  5.  Select the route with the shortest AS-path length.
+	//  6.  If all paths have the same AS-path length, select the path based
+	//      on origin: IGP is preferred over EGP; EGP is preferred over
+	//      Incomplete.
+	//  7.  If the origins are the same, select the path with lowest MED
+	//      value.
+	//  8.  If the paths have the same MED values, select the path learned
+	//      via EBGP over one learned via IBGP.
+	//  9.  Select the route with the lowest IGP cost to the next hop.
+	//  10. Select the route received from the peer with the lowest BGP
+	//      router ID.
 	//
-	//	Returns None if best-path among given paths cannot be computed else best
-	//	path.
-	//	Assumes paths from NC has source equal to None.
-	//
+	// Returns None if best-path among given paths cannot be computed else best
+	// path.
+	// Assumes paths from NC has source equal to None.
 
 	path1 := p[i]
 	path2 := p[j]
@@ -595,6 +596,10 @@ func (p paths) Less(i, j int) bool {
 	if better == nil {
 		better = compareByLocalOrigin(path1, path2)
 		reason = BPR_LOCAL_ORIGIN
+	}
+	if better == nil {
+		better = compareByAigpMetric(path1, path2)
+		reason = BPR_AIGP_METRIC
 	}
 	if better == nil {
 		better = compareByASPath(path1, path2)
@@ -733,6 +738,59 @@ func compareByLocalOrigin(path1, path2 *Path) *Path {
 	}
 
 	if path2.IsLocal() {
+		return path2
+	}
+	return nil
+}
+
+func compareByAigpMetric(path1, path2 *Path) *Path {
+	// Calculated the best-paths by comparing Accumulated IGP Metric.
+	//
+	// Lower metric is preferred and if both path have same metric, returns nil.
+	// If either path has no AIGP attribute, the path has AIGP attribute is
+	// prefer, but both paths have no AIGP attribute, returns nil.
+	// This comparison is invoked only when AIGP is enable in route selection
+	// options configuration.
+	if !SelectionOptions.EnableAigp {
+		log.WithFields(log.Fields{
+			"Topic": "Table",
+		}).Debug("compareByAigpMetric -- skip")
+		return nil
+	}
+
+	attr1 := path1.getPathAttr(bgp.BGP_ATTR_TYPE_AIGP)
+	attr2 := path2.getPathAttr(bgp.BGP_ATTR_TYPE_AIGP)
+	if attr1 == nil && attr2 == nil {
+		log.WithFields(log.Fields{
+			"Topic": "Table",
+		}).Debug("compareByAigpMetric -- skip (both paths have no AIGP attribute)")
+		return nil
+	} else if attr1 == nil {
+		log.WithFields(log.Fields{
+			"Topic": "Table",
+		}).Debug("compareByAigpMetric -- path1 has no AIGP attribute")
+		return path2
+	} else if attr2 == nil {
+		log.WithFields(log.Fields{
+			"Topic": "Table",
+		}).Debug("compareByAigpMetric -- path2 has no AIGP attribute")
+		return path1
+	}
+
+	attrMetric1 := attr1.(*bgp.PathAttributeAigp).GetIgpMetric()
+	attrMetric2 := attr2.(*bgp.PathAttributeAigp).GetIgpMetric()
+	nhMetric1 := uint64(path1.GetNexthopState().IgpMetric)
+	nhMetric2 := uint64(path2.GetNexthopState().IgpMetric)
+	metric1 := attrMetric1 + nhMetric1
+	metric2 := attrMetric2 + nhMetric2
+	log.WithFields(log.Fields{
+		"Topic": "Table",
+	}).Debugf("compareByAigpMetric -- metric1: %d, metric2: %d", metric1, metric2)
+
+	if metric1 != metric2 {
+		if metric1 < metric2 {
+			return path1
+		}
 		return path2
 	}
 	return nil

@@ -7871,6 +7871,20 @@ type PathAttributeAigp struct {
 	Values []AigpTLV
 }
 
+func (p *PathAttributeAigp) GetIgpMetric() uint64 {
+	// RFC7311: 3. AIGP Attribute
+	// When an AIGP attribute is created, it SHOULD contain no more than one
+	// AIGP TLV.  However, if it contains more than one AIGP TLV, only the
+	// first one is used as described in Sections 3.4 and 4.
+	for _, value := range p.Values {
+		switch v := value.(type) {
+		case *AigpTLVIgpMetric:
+			return v.Metric
+		}
+	}
+	return 0
+}
+
 func (p *PathAttributeAigp) DecodeFromBytes(data []byte, options ...*MarshallingOption) error {
 	err := p.PathAttribute.DecodeFromBytes(data, options...)
 	if err != nil {

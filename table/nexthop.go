@@ -28,6 +28,17 @@ type NexthopState struct {
 	IsUnreachable bool
 	// Shows the metric to the nexthop calculated by IGP.
 	IgpMetric uint32
+	// Shows whether this state is actually associated to IGP.
+	// If false, the IGP Metric in this state should not be used for the
+	// Accumulated IGP Metric calculation, because the path which has this
+	// nexthop might lead outside the AIGP administrative domain to which
+	// the BGP speaker belongs.
+	isIgpAssociated bool
+}
+
+// Determines the nexthop is reachable and actually associated to IGP.
+func (s *NexthopState) IsIgpActive() bool {
+	return !s.IsUnreachable && s.isIgpAssociated
 }
 
 func (s *NexthopState) Equal(other *NexthopState) bool {
@@ -38,6 +49,8 @@ func (s *NexthopState) Equal(other *NexthopState) bool {
 	} else if s.IsUnreachable != other.IsUnreachable {
 		return false
 	} else if s.IgpMetric != other.IgpMetric {
+		return false
+	} else if s.isIgpAssociated != other.isIgpAssociated {
 		return false
 	}
 	return true
@@ -74,5 +87,6 @@ func (m nexthopStateMap) updateNexthopState(state *NexthopState) (bool, error) {
 	}
 	m[addr].IsUnreachable = state.IsUnreachable
 	m[addr].IgpMetric = state.IgpMetric
+	m[addr].isIgpAssociated = true
 	return true, nil
 }

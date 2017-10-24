@@ -193,3 +193,12 @@ func (n *Neighbor) IsAddPathReceiveEnabled(family bgp.RouteFamily) bool {
 	}
 	return false
 }
+
+func (n *Neighbor) IsAigpEnabled(family bgp.RouteFamily) bool {
+	for _, af := range n.AfiSafis {
+		if af.State.Family == family {
+			return af.RouteSelectionOptions.State.EnableAigp
+		}
+	}
+	return false
+}

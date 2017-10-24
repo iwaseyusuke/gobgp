@@ -225,6 +225,8 @@ func setDefaultNeighborConfigValuesWithViper(v *viper.Viper, n *Neighbor, g *Glo
 			n.AfiSafis = []AfiSafi{defaultAfiSafi(AFI_SAFI_TYPE_IPV6_UNICAST, true)}
 		}
 		for i := range n.AfiSafis {
+			n.AfiSafis[i].RouteSelectionOptions.Config.EnableAigp = g.RouteSelectionOptions.Config.EnableAigp
+			n.AfiSafis[i].RouteSelectionOptions.State.EnableAigp = g.RouteSelectionOptions.Config.EnableAigp
 			n.AfiSafis[i].AddPaths.Config.Receive = n.AddPaths.Config.Receive
 			n.AfiSafis[i].AddPaths.State.Receive = n.AddPaths.Config.Receive
 			n.AfiSafis[i].AddPaths.Config.SendMax = n.AddPaths.Config.SendMax
@@ -258,6 +260,10 @@ func setDefaultNeighborConfigValuesWithViper(v *viper.Viper, n *Neighbor, g *Glo
 				n.AfiSafis[i].AddPaths.Config.SendMax = n.AddPaths.Config.SendMax
 			}
 			n.AfiSafis[i].AddPaths.State.SendMax = n.AfiSafis[i].AddPaths.Config.SendMax
+			if !vv.IsSet("afi-safi.route-selection-options.config.enable-aigp") {
+				n.AfiSafis[i].RouteSelectionOptions.Config.EnableAigp = g.RouteSelectionOptions.Config.EnableAigp
+			}
+			n.AfiSafis[i].RouteSelectionOptions.State.EnableAigp = n.AfiSafis[i].RouteSelectionOptions.Config.EnableAigp
 		}
 	}
 

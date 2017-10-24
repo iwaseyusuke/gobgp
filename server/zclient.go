@@ -301,7 +301,10 @@ func newIPRouteBody(dst pathList) (body *zebra.IPRouteBody, isWithdraw bool) {
 
 	msgFlags := zebra.MESSAGE_NEXTHOP
 	var metric uint32
-	if metric, err := path.GetMed(); err == nil {
+	if aigpMetric, err := path.GetAigpMetric(); err == nil {
+		metric = path.GetNexthopState().IgpMetric + uint32(aigpMetric)
+		msgFlags |= zebra.MESSAGE_METRIC
+	} else if metric, err := path.GetMed(); err == nil {
 		msgFlags |= zebra.MESSAGE_METRIC
 	} else if metric = path.GetNexthopState().IgpMetric; metric != 0 {
 		msgFlags |= zebra.MESSAGE_METRIC
