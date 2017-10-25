@@ -35,6 +35,7 @@ type pathList []*table.Path
 type nexthopTrackingManager struct {
 	dead                   chan struct{}
 	nexthopCache           map[string]struct{}
+	peerCache              map[string]struct{}
 	server                 *BgpServer
 	delay                  int
 	isScheduled            bool
@@ -47,6 +48,7 @@ func newNexthopTrackingManager(server *BgpServer, delay int) *nexthopTrackingMan
 	return &nexthopTrackingManager{
 		dead:         make(chan struct{}),
 		nexthopCache: make(map[string]struct{}),
+		peerCache:    make(map[string]struct{}),
 		server:       server,
 		delay:        delay,
 		scheduledNexthopStates: make(map[string]*table.NexthopState),
@@ -76,9 +78,37 @@ func (m *nexthopTrackingManager) registerNexthop(nexthop net.IP) bool {
 	return true
 }
 
-func (m *nexthopTrackingManager) unregisterNexthop(nexthop net.IP) {
+func (m *nexthopTrackingManager) unregisterNexthop(nexthop net.IP) bool {
 	key := nexthop.String()
+	if _, ok := m.nexthopCache[key]; !ok {
+		return false
+	}
+	// If the connected neighbor has the updated nexthop address as its own
+	// address, skips dropping cache.
+	if _, ok := m.peerCache[key]; ok {
+		return false
+	}
 	delete(m.nexthopCache, key)
+	return true
+}
+
+func (m *nexthopTrackingManager) registerPeer(address net.IP) bool {
+	key := address.String()
+	if _, ok := m.peerCache[key]; ok {
+		return false
+	}
+	m.peerCache[key] = struct{}{}
+	m.nexthopCache[key] = struct{}{}
+	return true
+}
+
+func (m *nexthopTrackingManager) unregisterPeer(address net.IP) bool {
+	key := address.String()
+	if _, ok := m.peerCache[key]; !ok {
+		return false
+	}
+	delete(m.peerCache, key)
+	return true
 }
 
 func (m *nexthopTrackingManager) calculateDelay(penalty int) int {
@@ -349,6 +379,36 @@ func newNexthopRegisterBody(dst pathList, nhtManager *nexthopTrackingManager) (b
 	}, path.IsWithdraw
 }
 
+func newNexthopRegisterBodyFromPeerState(ev *WatchEventPeerState, nhtManager *nexthopTrackingManager) (body *zebra.NexthopRegisterBody, isWithdraw bool) {
+	if nhtManager == nil {
+		return nil, false
+	}
+
+	nexthops := make([]*zebra.RegisteredNexthop, 0, 1)
+	if ev.PeerAddress.To4() != nil {
+		nexthops = append(nexthops, &zebra.RegisteredNexthop{
+			Prefix: ev.PeerAddress,
+			Family: syscall.AF_INET,
+		})
+	} else {
+		nexthops = append(nexthops, &zebra.RegisteredNexthop{
+			Prefix: ev.PeerAddress,
+			Family: syscall.AF_INET6,
+		})
+	}
+
+	if ev.State == bgp.BGP_FSM_ESTABLISHED {
+		nhtManager.registerPeer(ev.PeerAddress)
+	} else {
+		nhtManager.unregisterPeer(ev.PeerAddress)
+		isWithdraw = true
+	}
+
+	return &zebra.NexthopRegisterBody{
+		Nexthops: nexthops,
+	}, isWithdraw
+}
+
 func createPathFromIPRouteMessage(m *zebra.Message) (*table.Path, []*table.NexthopState) {
 	header := m.Header
 	body := m.Body.(*zebra.IPRouteBody)
@@ -442,13 +502,14 @@ func createNexthopStateFromNexthopUpdateMessage(m *zebra.Message, manager *table
 	// NEXTHOP_UNREGISTER message.
 	var nexthopUnregisterBody *zebra.NexthopRegisterBody
 	if pathsLen == 0 {
-		nexthopUnregisterBody = &zebra.NexthopRegisterBody{
-			Nexthops: []*zebra.RegisteredNexthop{{
-				Family: body.Family,
-				Prefix: body.Prefix,
-			}},
+		if deleted := nhtManager.unregisterNexthop(body.Prefix); deleted {
+			nexthopUnregisterBody = &zebra.NexthopRegisterBody{
+				Nexthops: []*zebra.RegisteredNexthop{{
+					Family: body.Family,
+					Prefix: body.Prefix,
+				}},
+			}
 		}
-		nhtManager.unregisterNexthop(body.Prefix)
 	}
 
 	return state, nexthopUnregisterBody, nil
@@ -469,6 +530,7 @@ func (z *zebraClient) loop() {
 	w := z.server.Watch([]WatchOption{
 		WatchBestPath(true),
 		WatchPostUpdate(true),
+		WatchPeerState(true),
 	}...)
 	defer w.Stop()
 
@@ -534,6 +596,10 @@ func (z *zebraClient) loop() {
 				}
 			case *WatchEventUpdate:
 				if body, isWithdraw := newNexthopRegisterBody(msg.PathList, z.nhtManager); body != nil {
+					z.client.SendNexthopRegister(0, body, isWithdraw)
+				}
+			case *WatchEventPeerState:
+				if body, isWithdraw := newNexthopRegisterBodyFromPeerState(msg, z.nhtManager); body != nil {
 					z.client.SendNexthopRegister(0, body, isWithdraw)
 				}
 			}
