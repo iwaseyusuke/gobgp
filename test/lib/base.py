@@ -327,9 +327,8 @@ class BGPContainer(Container):
                  graceful_restart=None, local_as=None, prefix_limit=None,
                  v6=False, llgr=None, vrf='', interface='', allow_as_in=0,
                  remove_private_as=None, replace_peer_as=False, addpath=False,
-                 treat_as_withdraw=False, remote_as=None):
-        neigh_addr = ''
-        local_addr = ''
+                 treat_as_withdraw=False, remote_as=None,
+                 neighbor_addr='', local_addr=''):
         it = itertools.product(self.ip_addrs, peer.ip_addrs)
         if v6:
             it = itertools.product(self.ip6_addrs, peer.ip6_addrs)
@@ -339,20 +338,24 @@ class BGPContainer(Container):
                 if bridge != '' and bridge != me[2]:
                     continue
                 if me[2] == you[2]:
-                    neigh_addr = you[1]
-                    local_addr = me[1]
-                    if v6:
-                        addr, mask = local_addr.split('/')
-                        local_addr = "{0}%{1}/{2}".format(addr, me[0], mask)
+                    if neighbor_addr == '':
+                        neighbor_addr = you[1]
+                    if local_addr == '':
+                        local_addr = me[1]
+                        if v6:
+                            addr, mask = local_addr.split('/')
+                            local_addr = "{0}%{1}/{2}".format(addr,
+                                                              me[0],
+                                                              mask)
                     break
 
-            if neigh_addr == '':
+            if neighbor_addr == '':
                 raise Exception('peer {0} seems not ip reachable'.format(peer))
 
         if not policies:
             policies = {}
 
-        self.peers[peer] = {'neigh_addr': neigh_addr,
+        self.peers[peer] = {'neigh_addr': neighbor_addr,
                             'interface': interface,
                             'passwd': passwd,
                             'vpn': vpn,
