@@ -505,9 +505,19 @@ class GoBGPContainer(BGPContainer):
             config['policy-definitions'] = policy_list
 
         if self.zebra:
-            config['zebra'] = {'config': {'enabled': True,
-                                          'redistribute-route-type-list': ['connect'],
-                                          'version': self.zapi_version}}
+            if 'zebra' not in config or 'config' not in config['zebra']:
+                # Default settings
+                config['zebra'] = {
+                    'config': {
+                        'enabled': True,
+                        'redistribute-route-type-list': ['connect'],
+                        'version': self.zapi_version,
+                    },
+                }
+            else:
+                # Overrides the required settings
+                config['zebra']['config']['enabled'] = True
+                config['zebra']['config']['version'] = self.zapi_version
 
         with open('{0}/gobgpd.conf'.format(self.config_dir), 'w') as f:
             print colors.yellow('[{0}\'s new gobgpd.conf]'.format(self.name))
