@@ -38,6 +38,8 @@ from lib.base import (
     BGP_ATTR_TYPE_LOCAL_PREF,
     BGP_ATTR_TYPE_COMMUNITIES,
     BGP_ATTR_TYPE_MP_REACH_NLRI,
+    BGP_ATTR_TYPE_AIGP,
+    AIGP_TLV_IGP_METRIC,
     community_str,
 )
 
@@ -189,6 +191,15 @@ class GoBGPContainer(BGPContainer):
                 return [community_str(c) for c in p['communities']]
         return None
 
+    @staticmethod
+    def _get_aigp_metric(path):
+        for p in path['attrs']:
+            if p['type'] == BGP_ATTR_TYPE_AIGP:
+                for v in p['value']:
+                    if v['type'] == AIGP_TLV_IGP_METRIC:
+                        return v['metric']
+        return None
+
     def _get_rib(self, dests_dict):
         dests = []
         for k, v in dests_dict.items():
@@ -198,6 +209,7 @@ class GoBGPContainer(BGPContainer):
                 p["local-pref"] = self._get_local_pref(p)
                 p["community"] = self._get_community(p)
                 p["med"] = self._get_med(p)
+                p["aigp-metric"] = self._get_aigp_metric(p)
                 p["prefix"] = k
                 path_id = p.get("id", None)
                 if path_id:
