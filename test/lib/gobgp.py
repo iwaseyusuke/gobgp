@@ -56,7 +56,8 @@ class GoBGPContainer(BGPContainer):
 
     def __init__(self, name, asn, router_id, ctn_image_name='osrg/gobgp',
                  log_level='debug', zebra=False, config_format='toml',
-                 zapi_version=2, bgp_config=None, ospfd_config=None):
+                 zapi_version=2, bgp_config=None, zebra_config=None,
+                 ospfd_config=None):
         super(GoBGPContainer, self).__init__(name, asn, router_id,
                                              ctn_image_name)
         self.shared_volumes.append((self.config_dir, self.SHARED_VOLUME))
@@ -86,6 +87,19 @@ class GoBGPContainer(BGPContainer):
         #     },
         # }
         self.bgp_config = bgp_config or {}
+
+        # Example:
+        # zebra_config = {
+        #     'interfaces': {  # interface settings
+        #         'eth0': [
+        #             'ip address 192.168.0.1/24',
+        #         ],
+        #     },
+        #     'routes': [  # static route settings
+        #         'ip route 172.16.0.0/16 172.16.0.1',
+        #     ],
+        # }
+        self.zebra_config = zebra_config or {}
 
         # To start OSPFd in GoBGP container, specify 'ospfd_config' as a dict
         # type value.
@@ -500,6 +514,12 @@ class GoBGPContainer(BGPContainer):
         c = CmdBuffer()
         c << 'hostname zebra'
         c << 'password zebra'
+        for name, settings in self.zebra_config.get('interfaces', {}).items():
+            c << 'interface {0}'.format(name)
+            for setting in settings:
+                c << str(setting)
+        for route in self.zebra_config.get('routes', []):
+            c << str(route)
         c << 'log file {0}/zebra.log'.format(self.QUAGGA_VOLUME)
         c << 'debug zebra packet'
         c << 'debug zebra kernel'
