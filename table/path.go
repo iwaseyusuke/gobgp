@@ -89,17 +89,25 @@ func NewBitmap(size int) *Bitmap {
 	return b
 }
 
+// originInfo containts the original path information which are immutable (not
+// modified after instantiated) values of Path. This structure helps a Path
+// instance to reuse unchanged values (e.g., the NLRI and the source peer
+// information).
 type originInfo struct {
 	nlri               bgp.AddrPrefixInterface
 	source             *PeerInfo
-	timestamp          int64
 	validation         *Validation
-	key                string
-	uuid               uuid.UUID
 	noImplicitWithdraw bool
 	isFromExternal     bool
 	eor                bool
 	stale              bool
+	timestamp          int64
+	key                string
+	uuid               uuid.UUID
+	// The original path attributes received from a peer or via APIs. When
+	// updating the path attributes (e.g. policy or advertising), this field
+	// should not modified. Use Path.pathAttrsFilter instead.
+	pathAttrs []bgp.PathAttributeInterface
 }
 
 type RpkiValidationReasonType string
@@ -139,21 +147,20 @@ type Validation struct {
 }
 
 type Path struct {
-	info       *originInfo
+	originInfo *originInfo
 	IsWithdraw bool
-	pathAttrs  []bgp.PathAttributeInterface
-	attrsHash  uint32
-	reason     BestPathReason
-	parent     *Path
-	dels       []bgp.BGPAttrType
-	filtered   map[string]PolicyDirection
-	VrfIds     []uint16
-	// For BGP Nexthop Tracking, this field shows if nexthop is invalidated by IGP.
+	// For BGP Nexthop Tracking, IsNexthopInvalid shows whether nexthop is
+	// invalidated by IGP or not.
 	IsNexthopInvalid bool
+	reason           BestPathReason
+	attrsHash        uint32
+	VrfIds           []uint16
+	filtered         map[string]PolicyDirection
+	pathAttrsFilter  map[bgp.BGPAttrType]bgp.PathAttributeInterface
 }
 
-func NewPath(source *PeerInfo, nlri bgp.AddrPrefixInterface, isWithdraw bool, pattrs []bgp.PathAttributeInterface, timestamp time.Time, noImplicitWithdraw bool) *Path {
-	if !isWithdraw && pattrs == nil {
+func NewPath(source *PeerInfo, nlri bgp.AddrPrefixInterface, isWithdraw bool, pathAttrs []bgp.PathAttributeInterface, timestamp time.Time, noImplicitWithdraw bool) *Path {
+	if !isWithdraw && pathAttrs == nil {
 		log.WithFields(log.Fields{
 			"Topic": "Table",
 			"Key":   nlri.String(),
@@ -162,15 +169,16 @@ func NewPath(source *PeerInfo, nlri bgp.AddrPrefixInterface, isWithdraw bool, pa
 	}
 
 	return &Path{
-		info: &originInfo{
+		originInfo: &originInfo{
 			nlri:               nlri,
 			source:             source,
 			timestamp:          timestamp.Unix(),
 			noImplicitWithdraw: noImplicitWithdraw,
+			pathAttrs:          pathAttrs,
 		},
-		IsWithdraw: isWithdraw,
-		pathAttrs:  pattrs,
-		filtered:   make(map[string]PolicyDirection),
+		IsWithdraw:      isWithdraw,
+		filtered:        make(map[string]PolicyDirection),
+		pathAttrsFilter: make(map[bgp.BGPAttrType]bgp.PathAttributeInterface),
 	}
 }
 
@@ -178,19 +186,17 @@ func NewEOR(family bgp.RouteFamily) *Path {
 	afi, safi := bgp.RouteFamilyToAfiSafi(family)
 	nlri, _ := bgp.NewPrefixFromRouteFamily(afi, safi)
 	return &Path{
-		info: &originInfo{
+		originInfo: &originInfo{
 			nlri: nlri,
 			eor:  true,
 		},
-		filtered: make(map[string]PolicyDirection),
+		filtered:        make(map[string]PolicyDirection),
+		pathAttrsFilter: make(map[bgp.BGPAttrType]bgp.PathAttributeInterface),
 	}
 }
 
 func (path *Path) IsEOR() bool {
-	if path.info != nil && path.info.eor {
-		return true
-	}
-	return false
+	return path.originInfo.eor
 }
 
 func cloneAsPath(asAttr *bgp.PathAttributeAsPath) *bgp.PathAttributeAsPath {
@@ -319,11 +325,11 @@ func UpdatePathAttrs(global *config.Global, peer *config.Neighbor, info *PeerInf
 }
 
 func (path *Path) GetTimestamp() time.Time {
-	return time.Unix(path.OriginInfo().timestamp, 0)
+	return time.Unix(path.originInfo.timestamp, 0)
 }
 
 func (path *Path) setTimestamp(t time.Time) {
-	path.OriginInfo().timestamp = t.Unix()
+	path.originInfo.timestamp = t.Unix()
 }
 
 func (path *Path) IsLocal() bool {
@@ -334,66 +340,58 @@ func (path *Path) IsIBGP() bool {
 	return path.GetSource().AS == path.GetSource().LocalAS
 }
 
-// create new PathAttributes
+// Clone creates a new Path instance which inherits the given Path instance.
 func (path *Path) Clone(isWithdraw bool) *Path {
+	pathAttrsFilter := make(map[bgp.BGPAttrType]bgp.PathAttributeInterface)
+	for typ, attr := range path.pathAttrsFilter {
+		pathAttrsFilter[typ] = attr
+	}
 	return &Path{
-		parent:           path,
+		originInfo:       path.originInfo,
 		IsWithdraw:       isWithdraw,
 		filtered:         make(map[string]PolicyDirection),
+		pathAttrsFilter:  pathAttrsFilter,
 		IsNexthopInvalid: path.IsNexthopInvalid,
 	}
 }
 
-func (path *Path) root() *Path {
-	p := path
-	for p.parent != nil {
-		p = p.parent
-	}
-	return p
-}
-
-func (path *Path) OriginInfo() *originInfo {
-	return path.root().info
-}
-
 func (path *Path) NoImplicitWithdraw() bool {
-	return path.OriginInfo().noImplicitWithdraw
+	return path.originInfo.noImplicitWithdraw
 }
 
 func (path *Path) Validation() *Validation {
-	return path.OriginInfo().validation
+	return path.originInfo.validation
 }
 
 func (path *Path) ValidationStatus() config.RpkiValidationResultType {
-	if v := path.OriginInfo().validation; v != nil {
+	if v := path.originInfo.validation; v != nil {
 		return v.Status
-	} else {
-		return config.RPKI_VALIDATION_RESULT_TYPE_NONE
 	}
+	return config.RPKI_VALIDATION_RESULT_TYPE_NONE
 }
 
 func (path *Path) SetValidation(v *Validation) {
-	path.OriginInfo().validation = v
+	path.originInfo.validation = v
 }
 
 func (path *Path) IsFromExternal() bool {
-	return path.OriginInfo().isFromExternal
+	return path.originInfo.isFromExternal
 }
 
 func (path *Path) SetIsFromExternal(y bool) {
-	path.OriginInfo().isFromExternal = y
+	path.originInfo.isFromExternal = y
 }
 
 func (path *Path) UUID() uuid.UUID {
-	return path.OriginInfo().uuid
+	return path.originInfo.uuid
 }
 
 func (path *Path) SetUUID(id []byte) {
-	path.OriginInfo().uuid = uuid.FromBytesOrNil(id)
+	path.originInfo.uuid = uuid.FromBytesOrNil(id)
 }
 
 func (path *Path) AssignNewUUID() {
-	path.OriginInfo().uuid, _ = uuid.NewV4()
+	path.originInfo.uuid, _ = uuid.NewV4()
 }
 
 func (path *Path) Filter(id string, reason PolicyDirection) {
@@ -405,22 +403,22 @@ func (path *Path) Filtered(id string) PolicyDirection {
 }
 
 func (path *Path) GetRouteFamily() bgp.RouteFamily {
-	return bgp.AfiSafiToRouteFamily(path.OriginInfo().nlri.AFI(), path.OriginInfo().nlri.SAFI())
+	return bgp.AfiSafiToRouteFamily(path.originInfo.nlri.AFI(), path.originInfo.nlri.SAFI())
 }
 
 func (path *Path) SetSource(source *PeerInfo) {
-	path.OriginInfo().source = source
+	path.originInfo.source = source
 }
 func (path *Path) GetSource() *PeerInfo {
-	return path.OriginInfo().source
+	return path.originInfo.source
 }
 
 func (path *Path) MarkStale(s bool) {
-	path.OriginInfo().stale = s
+	path.originInfo.stale = s
 }
 
 func (path *Path) IsStale() bool {
-	return path.OriginInfo().stale
+	return path.originInfo.stale
 }
 
 func (path *Path) IsLLGRStale() bool {
@@ -479,7 +477,7 @@ func (path *Path) SetNexthop(nexthop net.IP) {
 }
 
 func (path *Path) GetNlri() bgp.AddrPrefixInterface {
-	return path.OriginInfo().nlri
+	return path.originInfo.nlri
 }
 
 type PathAttrs []bgp.PathAttributeInterface
@@ -497,88 +495,44 @@ func (a PathAttrs) Less(i, j int) bool {
 }
 
 func (path *Path) GetPathAttrs() []bgp.PathAttributeInterface {
-	deleted := NewBitmap(math.MaxUint8)
-	modified := make(map[uint]bgp.PathAttributeInterface)
-	p := path
-	for {
-		for _, t := range p.dels {
-			deleted.Flag(uint(t))
+	pathAttrMap := make(map[bgp.BGPAttrType]bgp.PathAttributeInterface)
+	for _, attr := range path.originInfo.pathAttrs {
+		if attr != nil {
+			pathAttrMap[attr.GetType()] = attr
 		}
-		if p.parent == nil {
-			list := PathAttrs(make([]bgp.PathAttributeInterface, 0, len(p.pathAttrs)))
-			// we assume that the original pathAttrs are
-			// in order, that is, other bgp speakers send
-			// attributes in order.
-			for _, a := range p.pathAttrs {
-				typ := uint(a.GetType())
-				if m, ok := modified[typ]; ok {
-					list = append(list, m)
-					delete(modified, typ)
-				} else if !deleted.GetFlag(typ) {
-					list = append(list, a)
-				}
-			}
-			if len(modified) > 0 {
-				// Huh, some attributes were newly
-				// added. So we need to sort...
-				for _, m := range modified {
-					list = append(list, m)
-				}
-				sort.Sort(list)
-			}
-			return list
-		} else {
-			for _, a := range p.pathAttrs {
-				typ := uint(a.GetType())
-				if _, ok := modified[typ]; !deleted.GetFlag(typ) && !ok {
-					modified[typ] = a
-				}
-			}
-		}
-		p = p.parent
 	}
+	for typ, attr := range path.pathAttrsFilter {
+		pathAttrMap[typ] = attr
+	}
+	list := make([]bgp.PathAttributeInterface, 0)
+	for _, attr := range pathAttrMap {
+		// Note: "attr = nil" means the given attribute was deleted.
+		if attr != nil {
+			list = append(list, attr)
+		}
+	}
+	sort.Sort(PathAttrs(list))
+	return list
 }
 
 func (path *Path) getPathAttr(typ bgp.BGPAttrType) bgp.PathAttributeInterface {
-	p := path
-	for {
-		for _, t := range p.dels {
-			if t == typ {
-				return nil
-			}
-		}
-		for _, a := range p.pathAttrs {
-			if a.GetType() == typ {
-				return a
-			}
-		}
-		if p.parent == nil {
-			return nil
-		}
-		p = p.parent
+	if attr, ok := path.pathAttrsFilter[typ]; ok {
+		return attr
 	}
+	for _, attr := range path.originInfo.pathAttrs {
+		if attr.GetType() == typ {
+			return attr
+		}
+	}
+	return nil
 }
 
 func (path *Path) setPathAttr(a bgp.PathAttributeInterface) {
-	if len(path.pathAttrs) == 0 {
-		path.pathAttrs = []bgp.PathAttributeInterface{a}
-	} else {
-		for i, b := range path.pathAttrs {
-			if a.GetType() == b.GetType() {
-				path.pathAttrs[i] = a
-				return
-			}
-		}
-		path.pathAttrs = append(path.pathAttrs, a)
-	}
+	path.pathAttrsFilter[a.GetType()] = a
 }
 
 func (path *Path) delPathAttr(typ bgp.BGPAttrType) {
-	if len(path.dels) == 0 {
-		path.dels = []bgp.BGPAttrType{typ}
-	} else {
-		path.dels = append(path.dels, typ)
-	}
+	path.pathAttrsFilter[typ] = nil
 }
 
 // return Path's string representation
@@ -602,10 +556,10 @@ func (path *Path) String() string {
 }
 
 func (path *Path) getPrefix() string {
-	if path.OriginInfo().key == "" {
-		path.OriginInfo().key = path.GetNlri().String()
+	if path.originInfo.key == "" {
+		path.originInfo.key = path.GetNlri().String()
 	}
-	return path.OriginInfo().key
+	return path.originInfo.key
 }
 
 func (path *Path) GetAsPath() *bgp.PathAttributeAsPath {
@@ -1153,10 +1107,10 @@ func (v *Vrf) ToGlobalPath(path *Path) error {
 	switch rf := path.GetRouteFamily(); rf {
 	case bgp.RF_IPv4_UC:
 		n := nlri.(*bgp.IPAddrPrefix)
-		path.OriginInfo().nlri = bgp.NewLabeledVPNIPAddrPrefix(n.Length, n.Prefix.String(), *bgp.NewMPLSLabelStack(0), v.Rd)
+		path.originInfo.nlri = bgp.NewLabeledVPNIPAddrPrefix(n.Length, n.Prefix.String(), *bgp.NewMPLSLabelStack(0), v.Rd)
 	case bgp.RF_IPv6_UC:
 		n := nlri.(*bgp.IPv6AddrPrefix)
-		path.OriginInfo().nlri = bgp.NewLabeledVPNIPv6AddrPrefix(n.Length, n.Prefix.String(), *bgp.NewMPLSLabelStack(0), v.Rd)
+		path.originInfo.nlri = bgp.NewLabeledVPNIPv6AddrPrefix(n.Length, n.Prefix.String(), *bgp.NewMPLSLabelStack(0), v.Rd)
 	case bgp.RF_EVPN:
 		n := nlri.(*bgp.EVPNNLRI)
 		switch n.RouteType {
@@ -1211,7 +1165,7 @@ func (p *Path) ToGlobal(vrf *Vrf) *Path {
 	default:
 		return p
 	}
-	path := NewPath(p.OriginInfo().source, nlri, p.IsWithdraw, p.GetPathAttrs(), p.GetTimestamp(), false)
+	path := NewPath(p.originInfo.source, nlri, p.IsWithdraw, p.GetPathAttrs(), p.GetTimestamp(), false)
 	path.SetExtCommunities(vrf.ExportRt, false)
 	path.delPathAttr(bgp.BGP_ATTR_TYPE_NEXT_HOP)
 	path.setPathAttr(bgp.NewPathAttributeMpReachNLRI(nh.String(), []bgp.AddrPrefixInterface{nlri}))
@@ -1236,7 +1190,7 @@ func (p *Path) ToLocal() *Path {
 	default:
 		return p
 	}
-	path := NewPath(p.OriginInfo().source, nlri, p.IsWithdraw, p.GetPathAttrs(), p.GetTimestamp(), false)
+	path := NewPath(p.originInfo.source, nlri, p.IsWithdraw, p.GetPathAttrs(), p.GetTimestamp(), false)
 	path.delPathAttr(bgp.BGP_ATTR_TYPE_EXTENDED_COMMUNITIES)
 
 	if f == bgp.RF_IPv4_VPN {

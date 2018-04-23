@@ -5,9 +5,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/osrg/gobgp/config"
 	"github.com/osrg/gobgp/packet/bgp"
-	"github.com/stretchr/testify/assert"
 )
 
 func TestPathNewIPv4(t *testing.T) {
@@ -26,13 +27,8 @@ func TestPathNewIPv6(t *testing.T) {
 
 func TestPathGetNlri(t *testing.T) {
 	nlri := bgp.NewIPAddrPrefix(24, "13.2.3.2")
-	pd := &Path{
-		info: &originInfo{
-			nlri: nlri,
-		},
-	}
-	r_nlri := pd.GetNlri()
-	assert.Equal(t, r_nlri, nlri)
+	pd := NewPath(nil, nlri, true, nil, time.Now(), false)
+	assert.Equal(t, nlri, pd.GetNlri())
 }
 
 func TestPathCreatePath(t *testing.T) {
@@ -41,8 +37,7 @@ func TestPathCreatePath(t *testing.T) {
 	updateMsgP := msg.Body.(*bgp.BGPUpdate)
 	nlriList := updateMsgP.NLRI
 	pathAttributes := updateMsgP.PathAttributes
-	nlri_info := nlriList[0]
-	path := NewPath(peerP[0], nlri_info, false, pathAttributes, time.Now(), false)
+	path := NewPath(peerP[0], nlriList[0], false, pathAttributes, time.Now(), false)
 	assert.NotNil(t, path)
 
 }
@@ -51,8 +46,7 @@ func TestPathGetPrefix(t *testing.T) {
 	peerP := PathCreatePeer()
 	pathP := PathCreatePath(peerP)
 	prefix := "10.10.10.0/24"
-	r_prefix := pathP[0].getPrefix()
-	assert.Equal(t, r_prefix, prefix)
+	assert.Equal(t, prefix, pathP[0].getPrefix())
 }
 
 func TestPathGetAttribute(t *testing.T) {
@@ -60,8 +54,7 @@ func TestPathGetAttribute(t *testing.T) {
 	pathP := PathCreatePath(peerP)
 	nh := "192.168.50.1"
 	pa := pathP[0].getPathAttr(bgp.BGP_ATTR_TYPE_NEXT_HOP)
-	r_nh := pa.(*bgp.PathAttributeNextHop).Value.String()
-	assert.Equal(t, r_nh, nh)
+	assert.Equal(t, nh, pa.(*bgp.PathAttributeNextHop).Value.String())
 }
 
 func TestASPathLen(t *testing.T) {
@@ -204,7 +197,7 @@ func TestPathPrependAsnToFullPathAttr(t *testing.T) {
 	origin := bgp.NewPathAttributeOrigin(0)
 
 	asns := make([]uint16, 255)
-	for i, _ := range asns {
+	for i := range asns {
 		asns[i] = 65000 + uint16(i)
 	}
 
@@ -264,8 +257,7 @@ func PathCreatePath(peerP []*PeerInfo) []*Path {
 		updateMsgP := msg.Body.(*bgp.BGPUpdate)
 		nlriList := updateMsgP.NLRI
 		pathAttributes := updateMsgP.PathAttributes
-		nlri_info := nlriList[0]
-		pathP[i] = NewPath(peerP[i], nlri_info, false, pathAttributes, time.Now(), false)
+		pathP[i] = NewPath(peerP[i], nlriList[0], false, pathAttributes, time.Now(), false)
 	}
 	return pathP
 }
